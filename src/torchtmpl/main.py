@@ -5,6 +5,7 @@ import logging
 import sys
 import os
 import pathlib
+import csv
 
 # External imports
 import yaml
@@ -59,6 +60,8 @@ def train(config):
     logging_config = config["logging"]
     # Let us use as base logname the class name of the modek
     logname = model_config["class"]
+    if "SLURM_JOB_ID" in os.environ:
+        logname += f"_{os.environ['SLURM_JOB_ID']}"
     logdir = utils.generate_unique_logpath(logging_config["logdir"], logname)
     if not os.path.isdir(logdir):
         os.makedirs(logdir)
@@ -120,10 +123,59 @@ def train(config):
         if wandb_log is not None:
             logging.info("Logging on wandb")
             wandb_log(metrics)
+    
+    if "testpath" in config["data"]:
+        logging.info("=== Lancement automatique du test ===")
+        test_config = config.copy()
+        test_config["checkpoint"] = str(logdir / "best_model.pt")
+        test(test_config)
 
 
 def test(config):
-    raise NotImplementedError
+    use_cuda = torch.cuda.is_available()
+    device = torch.device("cuda") if use_cuda else torch.device("cpu")
+
+    # 1. Charger les données de test
+    logging.info("= Building Test Loader")
+    test_loader = data.get_test_dataloader(config["data"], use_cuda)
+
+    # 2. Reconstruire le modèle
+    input_size = (1, 128, 128) # Assurez-vous que cela correspond à votre preprocessing
+    # Pour le challenge, il y a 86 classes. Il faut le spécifier en dur ou le passer en config
+    num_classes = 86 
+    model = models.build_model(config["model"], input_size, num_classes)
+    
+    # 3. Charger les poids
+    logging.info(f"Loading checkpoint : {config['checkpoint']}")
+    model.load_state_dict(torch.load(config['checkpoint'], map_location=device))
+    model.to(device)
+    model.eval()
+
+    # 4. Inférence
+    results = []
+    logging.info("Starting inference...")
+    with torch.no_grad():
+        for inputs, filenames in tqdm.tqdm(test_loader):
+            inputs = inputs.to(device)
+            outputs = model(inputs)
+            preds = torch.argmax(outputs, dim=1).cpu().numpy()
+            
+            for fname, pred in zip(filenames, preds):
+                results.append((fname, pred))
+
+    # 5. Création du CSV
+    # On sauvegarde le CSV dans le même dossier que les logs du modèle
+    save_dir = pathlib.Path(config['checkpoint']).parent
+    csv_path = save_dir / "submission.csv"
+    
+    logging.info(f"Writing submission to {csv_path}")
+    with open(csv_path, "w", newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(["imgname", "label"]) # Header du challenge
+        for fname, label in results:
+            writer.writerow([fname, label])
+            
+    logging.info("Done.")
 
 
 if __name__ == "__main__":

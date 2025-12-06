@@ -44,6 +44,9 @@ python -m pip install .
 echo "Training"
 python -m torchtmpl.main {configpath} train
 
+echo "Copying results back"
+rsync -r logs $current_dir/
+
 if [[ $? != 0 ]]; then
     exit -1
 fi
