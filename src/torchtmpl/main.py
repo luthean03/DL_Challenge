@@ -12,6 +12,7 @@ import yaml
 import wandb
 import torch
 import torchinfo.torchinfo as torchinfo
+import tqdm
 
 # Local imports
 from . import data
@@ -162,6 +163,9 @@ def test(config):
             
             for fname, pred in zip(filenames, preds):
                 results.append((fname, pred))
+
+    # Sort results by filename
+    results.sort(key=lambda x: x[0])
 
     # 5. Création du CSV
     # On sauvegarde le CSV dans le même dossier que les logs du modèle
