@@ -2,15 +2,14 @@
 
 # Standard imports
 import logging
-import random
+import os
+import glob
+from PIL import Image
 
 # External imports
 import torch
-import torch.nn as nn
 import torch.utils.data
-import torchvision
-from torchvision import transforms
-
+from torchvision import transforms, datasets
 import matplotlib.pyplot as plt
 
 
@@ -21,37 +20,79 @@ def show_image(X):
     plt.show()
 
 
+class PlanktonTestDataset(torch.utils.data.Dataset):
+    """
+    Dataset spécifique pour le dossier de test qui ne contient pas de sous-dossiers de classes,
+    mais directement les images.
+    """
+    def __init__(self, root_dir, transform=None):
+        self.root_dir = root_dir
+        self.transform = transform
+        # Récupère tous les fichiers d'extensions supportées
+        supported_exts = ["jpg", "jpeg", "png", "tif", "tiff", "bmp"]
+        image_paths = []
+        for ext in supported_exts:
+            pattern = os.path.join(root_dir, "**", f"*.{ext}")
+            image_paths.extend(glob.glob(pattern, recursive=True))
+            pattern_upper = os.path.join(root_dir, "**", f"*.{ext.upper()}")
+            image_paths.extend(glob.glob(pattern_upper, recursive=True))
+        self.image_paths = sorted(image_paths)
+
+        if len(self.image_paths) == 0:
+            raise RuntimeError(f"Aucun fichier image trouvé dans {root_dir}. Vérifie les extensions et le contenu du dossier.")
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        path = self.image_paths[idx]
+        # Ouverture en RGB pour garantir 3 canaux
+        image = Image.open(path).convert("RGB")
+        
+        if self.transform:
+            image = self.transform(image)
+            
+        # On retourne le nom du fichier pour le CSV de soumission
+        filename = os.path.basename(path)
+        return image, filename
+
+
 def get_dataloaders(data_config, use_cuda):
+    train_path = data_config["trainpath"]  # Utilisation de l'argument trainpath
     valid_ratio = data_config["valid_ratio"]
     batch_size = data_config["batch_size"]
     num_workers = data_config["num_workers"]
 
-    logging.info("  - Dataset creation")
+    logging.info(f"  - Loading training data from {train_path}")
 
-    input_transform = transforms.Compose(
-        [transforms.Grayscale(), transforms.Resize((128, 128)), transforms.ToTensor()]
-    )
+    # Transformation des images (resize obligatoire pour le batching)
+    input_transform = transforms.Compose([
+        transforms.Resize((128, 128)),
+        transforms.ToTensor(),
+    ])
 
-    base_dataset = torchvision.datasets.Caltech101(
-        root=data_config["trainpath"],
-        download=True,
+    # Chargement du dataset complet (Train + Valid) via ImageFolder
+    # ImageFolder suppose une structure : trainpath/classe/image.jpg
+    base_dataset = datasets.ImageFolder(
+        root=train_path,
         transform=input_transform,
     )
 
-    logging.info(f"  - I loaded {len(base_dataset)} samples")
+    logging.info(f"  - Found {len(base_dataset)} images.")
 
-    indices = list(range(len(base_dataset)))
-    random.shuffle(indices)
-    num_valid = int(valid_ratio * len(base_dataset))
-    train_indices = indices[num_valid:]
-    valid_indices = indices[:num_valid]
+    # Séparation Train / Validation
+    num_total = len(base_dataset)
+    num_valid = int(valid_ratio * num_total)
+    num_train = num_total - num_valid
 
-    train_dataset = torch.utils.data.Subset(base_dataset, train_indices)
-    valid_dataset = torch.utils.data.Subset(base_dataset, valid_indices)
+    # Utilisation de random_split pour créer les sous-ensembles
+    train_subset, valid_subset = torch.utils.data.random_split(
+        base_dataset, [num_train, num_valid]
+    )
 
-    # Build the dataloaders
+    # Création des DataLoaders
     train_loader = torch.utils.data.DataLoader(
-        train_dataset,
+        train_subset,
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
@@ -59,14 +100,45 @@ def get_dataloaders(data_config, use_cuda):
     )
 
     valid_loader = torch.utils.data.DataLoader(
-        valid_dataset,
+        valid_subset,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
         pin_memory=use_cuda,
     )
 
-    num_classes = len(base_dataset.categories)
+    # Récupération des infos utiles
+    class_names = base_dataset.classes
+    num_classes = len(class_names)
     input_size = tuple(base_dataset[0][0].shape)
 
-    return train_loader, valid_loader, input_size, num_classes
+    return train_loader, valid_loader, input_size, num_classes, class_names
+
+
+def get_test_dataloader(data_config, use_cuda):
+    test_path = data_config["testpath"] # Utilisation de l'argument testpath
+    batch_size = data_config["batch_size"]
+    num_workers = data_config["num_workers"]
+    
+    logging.info(f"  - Loading test data from {test_path}")
+
+    input_transform = transforms.Compose([
+        transforms.Resize((128, 128)),
+        transforms.ToTensor(),
+    ])
+    
+    # Utilisation du Dataset personnalisé pour le test (structure plate)
+    test_dataset = PlanktonTestDataset(
+        root_dir=test_path, 
+        transform=input_transform
+    )
+    
+    test_loader = torch.utils.data.DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=use_cuda
+    )
+    
+    return test_loader

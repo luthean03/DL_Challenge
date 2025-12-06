@@ -6,7 +6,12 @@ import subprocess
 import tempfile
 
 
-def makejob(commit_id, configpath, nruns):
+def makejob(commit_id, configpath, command, nruns, existing_logdirs=None):
+    exclude_logs = "--exclude logs" if command == "train" else ""
+    existing_dirs_cmd = ""
+    if existing_logdirs:
+        mkdirs = "\n".join(f"mkdir -p $TMPDIR/code/logs/{d}" for d in existing_logdirs)
+        existing_dirs_cmd = f"mkdir -p $TMPDIR/code/logs\n{mkdirs}\n"
     return f"""#!/bin/bash
 
 #SBATCH --job-name=templatecode
@@ -27,7 +32,8 @@ echo "Running on " $(hostname)
 echo "Copying the source directory and data"
 date
 mkdir $TMPDIR/code
-rsync -r --exclude logs --exclude logslurms --exclude configs . $TMPDIR/code
+rsync -r --exclude logslurms --exclude configs {exclude_logs} . $TMPDIR/code
+{existing_dirs_cmd}
 
 echo "Checking out the correct version of the code commit_id {commit_id}"
 cd $TMPDIR/code
@@ -41,12 +47,15 @@ source venv/bin/activate
 # Install the library
 python -m pip install .
 
-echo "Training"
-python -m torchtmpl.main {configpath} train
+echo "Running {command}"
+python -m torchtmpl.main {configpath} {command}
 
 if [[ $? != 0 ]]; then
     exit -1
 fi
+
+# Copy the generated logs back to the submit directory so they survive the job
+rsync -a "$TMPDIR/code/logs/" "$current_dir/logs/"
 """
 
 
@@ -81,20 +90,34 @@ print(f"I will be using the commit id {commit_id}")
 # Ensure the log directory exists
 os.system("mkdir -p logslurms")
 
-if len(sys.argv) not in [2, 3]:
-    print(f"Usage : {sys.argv[0]} config.yaml <nruns|1>")
+if len(sys.argv) not in [3, 4]:
+    print(f"Usage : {sys.argv[0]} config.yaml <train|test> [nruns|1]")
     sys.exit(-1)
 
 configpath = sys.argv[1]
-if len(sys.argv) == 2:
+command = sys.argv[2]
+if command not in {"train", "test"}:
+    raise ValueError("Command must be either 'train' or 'test'")
+
+if len(sys.argv) == 3:
     nruns = 1
 else:
-    nruns = int(sys.argv[2])
+    nruns = int(sys.argv[3])
 
-# Copy the config in a temporary config file
-os.system("mkdir -p configs")
-tmp_configfilepath = tempfile.mkstemp(dir="./configs", suffix="-config.yml")[1]
-os.system(f"cp {configpath} {tmp_configfilepath}")
+job_configpath = configpath
+existing_logdirs = []
+if command == "train":
+    os.system("mkdir -p configs")
+    tmp_configfilepath = tempfile.mkstemp(dir="./configs", suffix="-config.yml")[1]
+    os.system(f"cp {configpath} {tmp_configfilepath}")
+    job_configpath = tmp_configfilepath
+    log_root = "logs"
+    if os.path.isdir(log_root):
+        existing_logdirs = sorted(
+            name
+            for name in os.listdir(log_root)
+            if os.path.isdir(os.path.join(log_root, name))
+        )
 
 # Launch the batch jobs
-submit_job(makejob(commit_id, tmp_configfilepath, nruns))
+submit_job(makejob(commit_id, job_configpath, command, nruns, existing_logdirs))

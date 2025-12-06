@@ -5,12 +5,15 @@ import logging
 import sys
 import os
 import pathlib
+import json
 
 # External imports
 import yaml
 import wandb
 import torch
 import torchinfo.torchinfo as torchinfo
+import tqdm
+import pandas as pd
 
 # Local imports
 from . import data
@@ -36,12 +39,13 @@ def train(config):
     logging.info("= Building the dataloaders")
     data_config = config["data"]
 
-    train_loader, valid_loader, input_size, num_classes = data.get_dataloaders(
+    # Modification ici : on récupère aussi class_names
+    train_loader, valid_loader, input_size, num_classes, class_names = data.get_dataloaders(
         data_config, use_cuda
     )
 
     # Build the model
-    logging.info("= Model")
+    logging.info(f"= Model (Input: {input_size}, Classes: {num_classes})")
     model_config = config["model"]
     model = models.build_model(model_config, input_size, num_classes)
     model.to(device)
@@ -57,7 +61,6 @@ def train(config):
 
     # Build the callbacks
     logging_config = config["logging"]
-    # Let us use as base logname the class name of the modek
     logname = model_config["class"]
     logdir = utils.generate_unique_logpath(logging_config["logdir"], logname)
     if not os.path.isdir(logdir):
@@ -68,9 +71,12 @@ def train(config):
     logdir = pathlib.Path(logdir)
     with open(logdir / "config.yaml", "w") as file:
         yaml.dump(config, file)
+        
+    # NOUVEAU : Sauvegarder les noms des classes pour la soumission
+    with open(logdir / "classes.json", "w") as f:
+        json.dump(class_names, f)
 
     # Make a summary script of the experiment
-    input_size = next(iter(train_loader))[0].shape
     summary_text = (
         f"Logdir : {logdir}\n"
         + "## Command \n"
@@ -79,12 +85,9 @@ def train(config):
         + f" Config : {config} \n\n"
         + (f" Wandb run name : {wandb.run.name}\n\n" if wandb_log is not None else "")
         + "## Summary of the model architecture\n"
-        + f"{torchinfo.summary(model, input_size=input_size)}\n\n"
+        + f"{torchinfo.summary(model, input_size=(1, *input_size))}\n\n"
         + "## Loss\n\n"
         + f"{loss}\n\n"
-        + "## Datasets : \n"
-        + f"Train : {train_loader.dataset.dataset}\n"
-        + f"Validation : {valid_loader.dataset.dataset}"
     )
     with open(logdir / "summary.txt", "w") as f:
         f.write(summary_text)
@@ -123,7 +126,73 @@ def train(config):
 
 
 def test(config):
-    raise NotImplementedError
+    # Cette fonction est appelée pour générer le fichier de soumission
+    use_cuda = torch.cuda.is_available()
+    device = torch.device("cuda") if use_cuda else torch.device("cpu")
+
+    # On récupère le dossier de logs depuis l'argument passé (le chemin du config.yaml)
+    # Exemple sys.argv[1] = "logs/VanillaCNN_0/config.yaml"
+    config_path = pathlib.Path(sys.argv[1])
+    log_dir = config_path.parent
+    
+    model_path = log_dir / "best_model.pt"
+    classes_path = log_dir / "classes.json"
+
+    if not model_path.exists() or not classes_path.exists():
+        logging.error("Model or classes.json not found in the log directory.")
+        sys.exit(-1)
+
+    # Chargement des classes
+    with open(classes_path, "r") as f:
+        class_names = json.load(f)
+    num_classes = len(class_names)
+    logging.info(f"Loaded {num_classes} classes.")
+
+    # Chargement du DataLoader de TEST (utilisation de testpath)
+    data_config = config["data"]
+    test_loader = data.get_test_dataloader(data_config, use_cuda)
+    
+    # On a besoin de la taille d'entrée pour construire le modèle
+    # On prend une image du loader pour vérifier
+    sample_img, _ = next(iter(test_loader))
+    input_size = sample_img.shape[1:]
+
+    # Reconstruction du modèle
+    model_config = config["model"]
+    model = models.build_model(model_config, input_size, num_classes)
+    
+    # Chargement des poids
+    logging.info(f"Loading weights from {model_path}")
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.to(device)
+    model.eval()
+
+    logging.info("Starting inference...")
+    predictions = []
+    filenames = []
+
+    with torch.no_grad():
+        for inputs, fnames in tqdm.tqdm(test_loader):
+            inputs = inputs.to(device)
+            outputs = model(inputs)
+            # On prend la classe avec la plus haute probabilité
+            _, preds = torch.max(outputs, 1)
+            
+            predictions.extend(preds.cpu().numpy())
+            filenames.extend(fnames)
+
+    # Conversion des indices en label numérique 1..N pour matcher les dossiers 0..N-1
+    predicted_labels = [str(p + 1) for p in predictions]
+
+    # Création du DataFrame et sauvegarde CSV
+    df = pd.DataFrame({
+        "image_id": filenames,
+        "label": predicted_labels
+    })
+    
+    submission_file = log_dir / "submission.csv"
+    df.to_csv(submission_file, index=False)
+    logging.info(f"Done! Submission file saved to: {submission_file}")
 
 
 if __name__ == "__main__":
