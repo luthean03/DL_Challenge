@@ -62,6 +62,7 @@ def get_dataloaders(data_config, use_cuda):
     valid_ratio = data_config["valid_ratio"]
     batch_size = data_config["batch_size"]
     num_workers = data_config["num_workers"]
+    use_weighted_sampler = data_config.get("use_weighted_sampler", False)
 
     logging.info(f"  - Loading training data from {train_path}")
 
@@ -90,12 +91,25 @@ def get_dataloaders(data_config, use_cuda):
         base_dataset, [num_train, num_valid]
     )
 
+    train_sampler = None
+    if use_weighted_sampler:
+        logging.info("  - Using weighted sampler for training")
+        targets = torch.tensor(base_dataset.targets)
+        class_counts = torch.bincount(targets)
+        weights = 1.0 / class_counts[targets]
+        subset_indices = torch.tensor(train_subset.indices)
+        sampler_weights = weights[subset_indices]
+        train_sampler = torch.utils.data.WeightedRandomSampler(
+            sampler_weights, num_train, replacement=True
+        )
+
     # Création des DataLoaders
     train_loader = torch.utils.data.DataLoader(
         train_subset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=train_sampler is None,
         num_workers=num_workers,
+        sampler=train_sampler,
         pin_memory=use_cuda,
     )
 

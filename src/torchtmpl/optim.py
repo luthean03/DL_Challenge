@@ -1,15 +1,18 @@
 # coding: utf-8
 
-# External imports
-import torch
-import torch.nn as nn
+from .losses import CrossEntropyWithLabelSmoothing
 
 
-def get_loss(lossname):
-    return eval(f"nn.{lossname}()")
+def get_loss(cfg):
+    name = cfg["name"]
+    smoothing = cfg.get("label_smoothing", 0.0)
+    if name == "CrossEntropy":
+        return CrossEntropyWithLabelSmoothing(smoothing)
+    raise ValueError(f"Unknown loss name: {name}")
 
 
 def get_optimizer(cfg, params):
-    params_dict = cfg["params"]
-    exec(f"global optim; optim = torch.optim.{cfg['algo']}(params, **params_dict)")
-    return optim
+    algo = cfg["algo"]
+    params_dict = cfg.get("params", {})
+    optim_cls = getattr(__import__("torch.optim", fromlist=[algo]), algo)
+    return optim_cls(params, **params_dict)

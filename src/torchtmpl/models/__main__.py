@@ -31,6 +31,18 @@ def test_cnn():
     print(f"Output tensor of size : {output.shape}")
 
 
+def test_efficientnet():
+    cfg = {"class": "EfficientNetV2S", "pretrained": False}
+    input_size = (1, 128, 128)
+    batch_size = 16
+    num_classes = 10
+    model = build_model(cfg, input_size, num_classes)
+
+    input_tensor = torch.randn(batch_size, *input_size)
+    output = model(input_tensor)
+    print(f"Output tensor of size : {output.shape}")
+
+
 if __name__ == "__main__":
     test_linear()
     test_cnn()

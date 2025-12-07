@@ -20,6 +20,35 @@ from . import data
 from . import models
 from . import optim
 from . import utils
+from .losses import ArcMarginProduct
+
+def _build_arc_head(model, num_classes, head_cfg, device):
+    if head_cfg.get("type") != "ArcFace":
+        return None
+
+    feature_dim = getattr(model, "feature_dim", None)
+    if feature_dim is None:
+        raise RuntimeError("Model must expose feature_dim for ArcFace head.")
+
+    arc_head = ArcMarginProduct(
+        feature_dim,
+        num_classes,
+        s=head_cfg.get("scale", 30.0),
+        m=head_cfg.get("margin", 0.50),
+        easy_margin=head_cfg.get("easy_margin", False),
+    )
+    arc_head.to(device)
+    return arc_head
+
+
+def _forward_with_optional_arc(model, inputs, arc_head, targets=None):
+    if arc_head is None:
+        return model(inputs)
+
+    features = model(inputs, return_features=True)
+    if targets is None:
+        return arc_head(features)
+    return arc_head(features, targets)
 
 
 def train(config):
@@ -38,17 +67,17 @@ def train(config):
     # Build the dataloaders
     logging.info("= Building the dataloaders")
     data_config = config["data"]
-
-    # Modification ici : on récupère aussi class_names
+    model_config = config["model"]
     train_loader, valid_loader, input_size, num_classes, class_names = data.get_dataloaders(
         data_config, use_cuda
     )
 
     # Build the model
     logging.info(f"= Model (Input: {input_size}, Classes: {num_classes})")
-    model_config = config["model"]
     model = models.build_model(model_config, input_size, num_classes)
     model.to(device)
+
+    arc_head = _build_arc_head(model, num_classes, model_config.get("head", {}), device)
 
     # Build the loss
     logging.info("= Loss")
@@ -102,10 +131,10 @@ def train(config):
 
     for e in range(config["nepochs"]):
         # Train 1 epoch
-        train_loss = utils.train(model, train_loader, loss, optimizer, device)
+        train_loss = utils.train(model, train_loader, loss, optimizer, device, arc_head)
 
         # Test
-        test_loss = utils.test(model, valid_loader, loss, device)
+        test_loss = utils.test(model, valid_loader, loss, device, arc_head)
 
         updated = model_checkpoint.update(test_loss)
         logging.info(
@@ -171,10 +200,12 @@ def test(config):
     predictions = []
     filenames = []
 
+    arc_head = _build_arc_head(model, num_classes, model_config.get("head", {}), device)
+
     with torch.no_grad():
         for inputs, fnames in tqdm.tqdm(test_loader):
             inputs = inputs.to(device)
-            outputs = model(inputs)
+            outputs = _forward_with_optional_arc(model, inputs, arc_head)
             # On prend la classe avec la plus haute probabilité
             _, preds = torch.max(outputs, 1)
             
